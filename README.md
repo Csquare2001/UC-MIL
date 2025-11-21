@@ -16,9 +16,9 @@ To run the codes, the following dependencies are required:
 ```plaintext
 └── UC-MIL/  
       ├── train.py                     # Code to train the model
-      ├── datasets.py                  # 
-      ├── 
+      ├── datasets.py                  # Dataset loading 
+      ├── test.py                      # Code for model testing and evaluation 
       ├── utils.py                     # Some supporting functions
-      ├── models/
-            └── 
+      ├── models/                      # All model files
+            └── ...
 ```
