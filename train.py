@@ -1,4 +1,3 @@
-
 from dataset_single import dataset_npy
 from torch.utils.data import DataLoader
 from model.KLmodel_cc import MIL_vit as create_model
