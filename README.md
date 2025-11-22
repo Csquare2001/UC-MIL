@@ -17,6 +17,6 @@ To run the codes, the following dependencies are required:
       ├── train_te.py                  # Code for model training and testing
       ├── datasets.py                  # Dataset loading  
       ├── utils.py                     # Some supporting functions
-      ├── models/                      # All model files
+      ├── model/                      # All model files
             └── ...
 ```
