@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from model.MSA_relative_instance_input_qsp import msa_197_768
+from models.MSA_relative_instance_input import msa_197_768
 from torch.distributions import Dirichlet
 
 class conv(nn.Module):
