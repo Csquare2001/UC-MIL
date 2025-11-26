@@ -1,9 +1,10 @@
-from dataset_single import dataset_npy
+from tqdm import tqdm
+
+from dataset_evi_cau import dataset_npy
 from torch.utils.data import DataLoader
-from model.uc_model_cc import MIL_vit as create_model
+from model.model_evidence_causal import MIL_vit as create_model
 from torchnet import meter
-from smooth_label import LabelSmoothingCrossEntropy
-from lossfunction.loss import Arc,PatchCrossEntropyLoss,TripletLoss,Instance_CE
+from utils import PatchCrossEntropyLoss,TripletLoss,Instance_CE, compute_L_CI, compute_L_NC, LabelSmoothingCrossEntropy
 from sklearn.metrics import roc_curve, auc, roc_auc_score
 import torch
 import sys
@@ -15,7 +16,8 @@ import os
 import torch.nn.functional as F
 sys.path.append("model")
 os.environ["CUDA_VISIBLE_DEVICES"] = "3"
-device = torch.device('cuda:0');device_ids = [0]
+device = torch.device('cuda:0'); device_ids = [0]
+
 
 def setup_seed(seed):
     torch.manual_seed(seed)
@@ -25,7 +27,6 @@ def setup_seed(seed):
     torch.backends.cudnn.deterministic = True
 
 
-loss_arc = Arc(196, 196).to(device)
 loss_lsce = LabelSmoothingCrossEntropy()
 loss_fn = PatchCrossEntropyLoss()
 loss_ce = Instance_CE()
@@ -33,104 +34,56 @@ loss_triplet = TripletLoss()
 loss_constritive = torch.nn.TripletMarginLoss(margin=0.8)
 loss_kl = torch.nn.KLDivLoss(size_average = False)
 log_sm = torch.nn.LogSoftmax(dim = 1)
+adversarial_loss = torch.nn.BCELoss()
+loss_mse = torch.nn.MSELoss()
+loss_NC = compute_L_NC()
+loss_CI = compute_L_CI()
 weight= 1
-
-
-def lst(label_train):
-    label_list = []
-    for _ in range(2):
-        label_list.append([])
-    for label, item in enumerate(label_train):
-        for k in range(2):
-            if item == k:
-                label_list[k].append(label)
-    return label_list
-
-def positive_pair(label, lst1, label_list):
-    for k in range(2):
-        if label == k:
-            index = random.choice(label_list[k])
-            lst1.append(index)
-            break
-    return lst1
-
-def negative_pair(label, lst, label_list):
-    Flag = True
-    while Flag:
-        k = random.choice([K for K in range(2)])
-        if label != k:
-            index = random.choice(label_list[k])
-            lst.append(index)
-            Flag = False
-        else:
-            continue
-    return lst
-
-def cal_kl(instance_cla_block11,instance_cla_block12):
-    patch_prediction_11 = torch.softmax(instance_cla_block11, dim=-1)
-    patch_prediction_12 = torch.softmax(instance_cla_block12, dim=-1)
-    instance_cla_block11 = patch_prediction_11[:, :, 1]
-    instance_cla_block12 = patch_prediction_12[:, :, 1]
-    mean_instance_pred = torch.nn.Softmax(dim=1)(0.5*instance_cla_block11 + instance_cla_block12)
-    kl_divergences = torch.zeros(instance_cla_block12.size(0), instance_cla_block12.size(1)).cuda()
-    for i in range(instance_cla_block12.size(0)):
-        for j in range(instance_cla_block12.size(1)):
-            kl_div = (loss_kl(log_sm(instance_cla_block11)[i, j], mean_instance_pred[i, j]) +
-                    loss_kl(log_sm(instance_cla_block12)[i, j], mean_instance_pred[i, j])).item()
-            kl_divergences[i, j] = kl_div
-    min_val = kl_divergences.min()
-    max_val = kl_divergences.max()
-    kl_divergences = (kl_divergences - min_val) / (max_val - min_val)
-    return kl_divergences,mean_instance_pred
 
 
 
 def train():
-    seed=40
-    setup_seed(seed)
-
-    # train_data_root = '/media/user/Disk02/zyl/split_600/npy_crop_600/image'
-    # print("************************************************")
-    # data_split_path='/media/user/Disk02/zyl/re_mil420'
-
-    train_data_root = "1017/2024_data_all_cc"
+    torch.autograd.set_detect_anomaly(True)
+    train_data_root = "data_1017/data_all"
     print("************************************************")
-    data_split_path="1017"
+    data_split_path="/data4/caochi/UC-MIL/data_1017/split_sel_1072_203_1"
     data_split = ['12345','23451','34512','45123','51234']
-    for i in range(5):
+    for i in range(0, 5):
         print("*****ROUND--{}*****".format(i))
-        batchsize=4
+        batchsize = 8
+        seed = 42
+        setup_seed(seed)
         train_data = dataset_npy(train_data_root,data_split_path,data_split[i],is_transform=True, train=True)
         print(len(train_data))
-        # train_dataloader = DataLoader(train_data, batch_size=batchsize, shuffle=True, num_workers=2)
         model=create_model()
         model = torch.nn.DataParallel(model, device_ids=device_ids).cuda()#must have decica[0],the main card
         print("model:",next(model.parameters()).device)
-        model_name="600_mil_beta_arc_instance_constraloss_KLuncertainty_localagg"
+        model_name="1016_mil_Evi_uncertainty_Casuality_fold5-4-3-2-1(cc2_final)_te_pub"
         print(model_name)
         epochs=100
-        lrf=0.01;lr=0.0001
+        lrf=0.01; lr = 0.0001
         pg = [p for p in model.parameters() if p.requires_grad]
         optimizer = torch.optim.SGD(pg, lr=lr, momentum=0.9, weight_decay=5E-5)
         lf = lambda x: ((1 + math.cos(x * math.pi / epochs)) / 2) * (1 - lrf) + lrf  # cosine
         scheduler = lr_scheduler.LambdaLR(optimizer, lr_lambda=lf)
+
         va_acc_list = [];va_acu_list = []
         test_acc_list=[];test_acu_list=[]
         if not os.path.exists(
-                './results/{}-{}-{}-{}/{}'.format(model_name,batchsize,lr,seed,data_split[i])):
+                './results_xk_xxx/fd-cau/{}-{}-{}-{}/{}'.format(model_name,batchsize,lr,seed,data_split[i])):
             os.makedirs(
-                './results/{}-{}-{}-{}/{}'.format(model_name,batchsize,lr,seed,data_split[i]))
-        submit_path =  './results/{}-{}-{}-{}/{}/'.format(model_name,batchsize,lr,seed,data_split[i])
+                './results_xk_xxx/fd-cau/{}-{}-{}-{}/{}'.format(model_name,batchsize,lr,seed,data_split[i]))
+        submit_path =  './results_xk_xxx/fd-cau/{}-{}-{}-{}/{}/'.format(model_name,batchsize,lr,seed,data_split[i])
         submit_file_name = '{}-{}-{}-{}-{}.csv'.format(model_name,batchsize,lr,seed,weight)
         csv_file = open(submit_path + submit_file_name, 'w')
-        csv_file.write("epoch, tr_loss, tr_auc, tr_acc, va_auc, va_acc, va_sens, va_spec,te_auc, te_acc, te_sens, te_spec\n")
+        csv_file.write("epoch, va_auc, va_acc, va_sens, va_spec\n")
 
 
         for epoch in range(epochs):
             model.train()
             train_loss_epoch,cla_loss_epoch,mil_loss_epoch,instance_loss_epoch,cla_constra_epoch,mil_constra_epoch = 0.,0.,0.,0.,0.,0.
             all_predictions = []
-            if(epoch > 0):
+            if(epoch > 10):
                 new_patch_labels = {}
                 start = 0
                 for img_path in train_data.imgs:
@@ -138,6 +91,8 @@ def train():
                     new_patch_labels[img_path] = predictions[start:end].detach().numpy()
                     start = end
                 train_data.update_labels(new_patch_labels)
+                # print(predictions.shape)          # 1593*196
+
             train_dataloader = DataLoader(train_data, batch_size=batchsize, shuffle=True, num_workers=2)
             if (epoch >= 80):
                 if not os.path.exists('./draw_kl_agg2/{}/{}'.format(model_name,data_split[i])):
@@ -145,130 +100,76 @@ def train():
                 submit_draw_path = './draw_kl_agg2/{}/{}'.format(model_name,data_split[i])
                 submit_draw_filename = '/epoch_{}_output.txt'.format(epoch)
 
-            for step, (data, label,img_path,patch_label) in enumerate (train_dataloader):
+            for step, (data, label, img_path, patch_label, _) in enumerate(tqdm(train_dataloader)):
+
+                # print(data.shape)
                 cla_constra = 0
                 mil_constra = 0
-                positive_pairs = []
-                negative_pairs = []
-                positive_pairs_train = []
-                negative_pairs_train = []
-                label_list = list(label)
 
                 label = torch.LongTensor(label).to(device)
-                cla,mil_bag,instance_cla_pri,instance_cla_aux=model(data,patch_label)
-                p = (torch.softmax(instance_cla_pri, dim=-1) + torch.softmax(instance_cla_aux, dim=-1)) / 2
-                pt = p**(1/0.5)
-                pseudo_label = pt / pt.sum(dim=-1, keepdim=True)
-                pseudo_label = pseudo_label[:,:,1]
-                pseudo_label = pseudo_label.squeeze()
-                # print("pseudo_label",pseudo_label.shape)
-                # pseudo_label = torch.softmax(instance_cla_pri,dim=-1)
-                # pseudo_label = pseudo_label[:,:,1]
 
-                # if epoch < 1:
-                #     if(step == 0):
-                #         print("pseudo_label:",pseudo_label)
-                #         print("patch_label:",patch_label)
-                # else:
-                #     if(step == 0):
-                #         print("pseudo_label:",pseudo_label)
-                #         print("patch_label:",patch_label)
+                ### model output
+                instance_pred, uncertainty, CauScore, topk_indices, F_c, F_nc, bag_pred = model(data)
+                # print(instance_pred.shape)
+                instance_pred = torch.softmax(instance_pred, dim=-1)
+                pseudo_label = instance_pred[:, :, 1]
 
-                ########################### KL Uncertainty ##########################################
-                kl_divergences,_ = cal_kl(instance_cla_pri,instance_cla_aux)
-                #####################################################################################
-
-                ########################## bag contrastive learning #################################
-                if all(len(lst) > 0 for lst in label_list):
-                    for ij in range(len(data)):
-                        positive_pairs = positive_pair(label[ij], positive_pairs, label_list)
-                        negative_pairs = negative_pair(label[ij], negative_pairs, label_list)
-
-                    for _, label_id in enumerate(positive_pairs):
-                        x_temp = train_data[label_id]
-                        positive_pairs_train.append(x_temp)
-
-                    for _, label_id in enumerate(negative_pairs):
-                        x_temp1 = train_data[label_id]
-                        negative_pairs_train.append(x_temp1)
-
-                    data_p = positive_pairs_train[0][0].reshape(-1, 196, 16, 16)
-                    data_n = negative_pairs_train[0][0].reshape(-1, 196, 16, 16)
-
-                    for ii in range(len(label)-1):
-                        data_p = torch.cat([data_p,(positive_pairs_train[ii+1][0]).reshape(-1,196, 16, 16)],0)
-
-                    for ii in range(len(label)-1):
-                        data_n = torch.cat([data_n,(negative_pairs_train[ii+1][0]).reshape(-1,196,16, 16)],0)
-
-                    data_p = data_p.to(device)
-                    data_n = data_n.to(device)
-
-
-                    cla_constra_0,mil_constra_0,instance_cla_pri_constra,instance_cla_aux_constra = model(data_p,patch_label)
-                    cla_constra_1,mil_constra_1,instance_cla_pri_constra1,instance_cla_aux_constra1 = model(data_n,patch_label)
-
-                    cla_constra = loss_constritive(cla,cla_constra_0,cla_constra_1)
-                    # mil_constra = loss_constritive(mil,mil_constra,mil_constra_1)
-                #################################################################################################
-
-                #########uncertainty loss#########################################################################
-                # out = loss_arc(instance_cla_pri.squeeze())
-                # Lce = loss_fn(out,pseudo_label)
-                # print(label.size())
-                # print(pseudo_label.size())
-
-                # Lce = loss_fn(instance_cla_pri,torch.LongTensor(pseudo_label).to(device))
-                # print(instance_cla_pri.size())
-                # print(pseudo_label.size())
                 all_predictions.append(pseudo_label.cpu())
-                Lce = loss_ce(instance_cla_pri,patch_label.to(device))
-                loss_instance = torch.mean(torch.exp(-kl_divergences)*Lce + kl_divergences)
-                # loss_instance =torch.nn.functional.binary_cross_entropy_with_logits(out*kl_divergences,pseudo_label)
-                #################################################################################################
-                loss_cla= loss_lsce(cla, label)
-                loss_mil = loss_lsce(mil_bag,label)
-                #loss_instance = instance_CE(insatance_cla,pseudo_label)
+                Lce = loss_ce(instance_pred[:, :, 1], patch_label.to(device))
+                loss_instance = torch.mean(torch.exp(-uncertainty)*Lce)
 
-                loss = loss_cla +loss_mil + loss_instance+cla_constra
+                #################################################################################################
+                loss_bag = loss_lsce(bag_pred, label)
+                # loss_cls = loss_lsce(cls_token, label)
+
+                # print(F_nc.shape, label.shape)
+                loss_nc = loss_NC(F_nc, label, model.module.bag_classification)
+                loss_ci = loss_CI(F_c, F_nc, model.module.fusion_layer, model.module.bag_classification)
+
+                loss = loss_bag + 0.8 * loss_instance + 0.5 * loss_nc + 0.6 * loss_ci
+
                 optimizer.zero_grad()
-                # torch.autograd.detect_anomaly(True)
+
                 loss.backward()
                 optimizer.step()
 
                 # train_dataloader = DataLoader(train_data, batch_size=batchsize, shuffle=True, num_workers=2)
-                train_loss_epoch+=loss.item();cla_loss_epoch+=loss_cla.item();mil_loss_epoch+=loss_mil.item();instance_loss_epoch+=loss_instance.item();cla_constra_epoch+=cla_constra;mil_constra_epoch+=mil_constra
+                train_loss_epoch+=loss.item();mil_loss_epoch+=loss_bag.item();instance_loss_epoch+=loss_instance.item();cla_constra_epoch+=cla_constra;mil_constra_epoch+=mil_constra
 
                 if (epoch >= 80):
                     with open(submit_draw_path+submit_draw_filename, 'a') as f:
                         for index in range(len(data)):
                             f.write(f"Training data: {img_path[index]}\n")
                             f.write(f"label matrix: {patch_label[index]}\n")
-                            save_cla = torch.softmax(instance_cla_pri, dim=-1)
-                            save_cla = save_cla[:,:,1]
-                            f.write(f"preds matrix: {save_cla[index]}\n")
-                            f.write(f"uncertainty matrix:{kl_divergences[index]}\n")
+                            f.write(f"preds matrix: {pseudo_label[index]}\n")
+                            f.write(f"uncertainty matrix:{uncertainty[index]}\n")
                             f.write(f"----------------------------------------------------------------------\n")
             predictions = torch.cat(all_predictions)
             # new_patch_labels = predictions
+
+            print('\n当前学习率')
             print(scheduler.get_last_lr())
             print("train_loss: {:.3f}   cla_loss: {:.3f}   mil_loss: {:.3f}   instance_loss: {:.3f}  cla_constra:{:.3f} mil_constra:{:.3f}".
                   format(train_loss_epoch/batchsize, cla_loss_epoch/batchsize, mil_loss_epoch/batchsize, instance_loss_epoch/batchsize,cla_constra_epoch/batchsize,mil_constra_epoch/batchsize))
             scheduler.step()
 
-            pat_train_data  = dataset_npy(train_data_root, data_split_path, data_split[i], is_transform=False, train=True)
-            pat_val_data = dataset_npy(train_data_root, data_split_path, data_split[i],is_transform=False, val=True)
-            pat_test_data = dataset_npy(train_data_root, data_split_path, data_split[i], is_transform=False, test=True)
 
-            tr_auc, tr_acc, tr_sens, tr_spec, tr_los,tr_score,tr_lab,tr_false = val(model, pat_train_data)
-            va_auc, va_acc, va_sens, va_spec, va_los,va_score,va_lab,va_false = val(model, pat_val_data)
-            # te_auc, te_acc, te_sens, te_spec, te_los, te_score, te_lab,te_false = val(model, pat_test_data)
+            # pat_train_data  = dataset_npy(train_data_root, data_split_path, data_split[i], is_transform=False, train=True)
+            pat_val_data = dataset_npy(train_data_root, data_split_path, data_split[i], is_transform=False, val=True)        # 612
+            pat_fy_data = dataset_npy(train_data_root, data_split_path, data_split[i], is_transform=False, test3=True)
+            pat_pub_data = dataset_npy(train_data_root, data_split_path, data_split[i], is_transform=False, test1=True)
 
-            va_acc_list.append(va_acc);va_acu_list.append(va_auc)
-            # test_acc_list.append(te_acc);test_acu_list.append(te_auc)
+            # tr_auc, tr_acc, tr_sens, tr_spec, tr_los,tr_score,tr_lab,tr_false, tr_name = val(model, pat_train_data)
+            va_auc, va_acc, va_sens, va_spec, va_los, va_score, va_lab, va_false, va_name = val(model, pat_val_data)
+            fy_auc, fy_acc, fy_sens, fy_spec, fy_los, fy_score, fy_lab, fy_false, fy_name = val(model, pat_fy_data)
+            pub_auc, pub_acc, pub_sens, pub_spec, pub_los, pub_score, pub_lab, pub_false, pub_name = val(model, pat_pub_data)
+
+
+            va_acc_list.append(va_acc); va_acu_list.append(va_auc)
+            print("-----------------", va_auc.shape)
 
             print('******************Epoch: ', epoch, '******************')
-            print("train_loss: {:.3f}, train_auc:{:.3f},train_acc: {:.3f}".format(tr_los, tr_auc, tr_acc))
+            # print("train_loss: {:.3f}, train_auc:{:.3f},train_acc: {:.3f}".format(tr_los, tr_auc, tr_acc))
             print("val_loss: {:.3f}, val_auc:{:.3f},val_acc: {:.3f}".format( va_los,va_auc,va_acc ))
             # print("te_loss: {:.3f}, te_auc:{:.3f},te_acc: {:.3f}".format(te_los, te_auc, te_acc))
 
@@ -276,28 +177,53 @@ def train():
                     submit_path + 'va'):
                 os.makedirs(
                       submit_path + 'va')
-            if not os.path.exists(
-                      submit_path + 'te'):
-                os.makedirs(
-                    submit_path + 'te')
-            # np.savetxt(submit_path + 'te/{}-{}-{}-{}te_score.csv'.format(batchsize, lr, seed, epoch),
-            #                 np.concatenate([te_score, te_lab], axis=1), delimiter=',')
+
             np.savetxt(submit_path + 'va/{}-{}-{}-{}va_score.csv'.format(batchsize, lr, seed, epoch),
-                       np.concatenate([va_score, va_lab], axis=1), delimiter=',')
+                       np.concatenate([va_name, va_score, va_lab], axis=1), fmt="%s", delimiter=',',
+                       header="name,score,label", comments='')
+
+
+
+            if not os.path.exists(
+                    submit_path + 'fy'):
+                os.makedirs(
+                      submit_path + 'fy')
+
+            np.savetxt(submit_path + 'fy/{}-{}-{}-{}fy_score.csv'.format(batchsize, lr, seed, epoch),
+                       np.concatenate([fy_name, fy_score, fy_lab], axis=1), fmt="%s", delimiter=',',
+                       header="name,score,label", comments='')
+
+
+
+            if not os.path.exists(
+                    submit_path + 'pub'):
+                os.makedirs(
+                      submit_path + 'pub')
+
+            np.savetxt(submit_path + 'pub/{}-{}-{}-{}pub_score.csv'.format(batchsize, lr, seed, epoch),
+                       np.concatenate([pub_name, pub_score, pub_lab], axis=1), fmt="%s", delimiter=',',
+                       header="name,score,label", comments='')
+
+
+
             csv_file.write(
-                str(epoch) + ',' + str(round(loss.item(), 3)) + ',' + str(tr_auc) + ',' + str(tr_acc) + ','
-                + str(va_auc) + ',' + str(va_acc) + ',' + str(va_sens) + ',' + str(va_spec) + ',')
-                 # +str(te_auc) + ',' + str(te_acc) + ',' + str(te_sens) + ',' + str(te_spec)+'\n')
-        csv_file.write('va_acc_max' + ',' + str(max(va_acc_list)) + ',' + 'va_auc_max' + ',' + str(max(va_acu_list))+','+
-            'te_acc_max' + ',' + str(max(test_acc_list)) + ',' + 'te_auc_max' + ',' + str(max(test_acu_list)))
-        print("max_va_acc:{:.3f},max_va_auc:{:.3f},max_te_acc:{:.3f},max_te_auc:{:.3f}".
-              format(max(va_acc_list),max(va_acu_list),max(test_acc_list),max(test_acu_list)))
+                str(epoch) + ',' + str(va_auc) + ',' + str(va_acc) + ',' + str(va_sens) + ',' + str(va_spec) + ',' + \
+                str(fy_auc) + ',' + str(fy_acc) + ',' + str(fy_sens) + ',' + str(fy_spec) + ',' + \
+                str(pub_auc) + ',' + str(pub_acc) + ',' + str(pub_sens) + ',' + str(pub_spec) + '\n')
+
+
+
 
 
 @torch.no_grad()
 def val(model, data):
+    """
+    计算模型在验证集上的准确率等信息
+    return: 分割损失，重分割损失，重建损失，一致性损失
+    """
 
     dataloader = DataLoader(data, 3, shuffle=False, num_workers=2)
+    print(len(data))
     if isinstance(model, torch.nn.DataParallel):
         model = model.module
     model.eval()
@@ -305,60 +231,52 @@ def val(model, data):
     loss_av = meter.AverageValueMeter()
     confusion_matrix = meter.ConfusionMeter(2)
     false_name = []
-
     score = np.array([]).reshape(0, 1)
     lab = np.array([]).reshape(0, 1)
-    count = 0
-    # score = []
-    # lab   = []
+    name = np.array([]).reshape(0, 1)
 
-    for ii, (input, label,_,_) in enumerate(dataloader):
+
+    for ii, (input, label, _, patch_label, name1) in enumerate(dataloader):
         input = input.to(device)
         label3 = label.to(device)
+        patch_label = patch_label.to(device)
+        name1 = np.array(list(name1))
 
-        cla_score= model(input,label3)
-        '''cla_score, rec_score, fea = model(input)
-        cla_score2, rec_score2, fea2 = model(rec_score)'''
+        instance_pred, uncertainty, CauScore, topk_indices, F_c, F_nc, bag_pred = model(input)
 
-        # pro = t.nn.functional.softmax\
-        # (cla_score)[:,1].data.tolist()
-
-        pro = torch.nn.functional.softmax(cla_score,dim=1)
+        pro = torch.nn.functional.softmax(bag_pred, dim=1)
         cla = torch.mean(pro, dim=0).view(1, 2).detach()  # tensor([[0.5952, 0.4048]])
         _, pred = cla.max(1)  # predict result
         if (pred == label[0]).item() != True:
-            # print(data.imgs[i * 3].split('/')[-1].split('.')[-2] + "false predicition")
             false_name.append(data.imgs[ii * 3].split('/')[-1].split('.')[-2].split('_')[-2])
 
-        # fc/softmax layer output shape : (batch_size, 2)
-        # for calculate auc
-        cla_np = np.mean(pro[:, 1].cuda().data.cpu().numpy()).reshape(-1, 1) 
+        cla_np = np.mean(pro[:, 1].cuda().data.cpu().numpy()).reshape(-1, 1)
+
         lab_np = label3.cuda().data.cpu().numpy()[0:1].reshape(-1, 1)
+        name_t = name1.reshape(-1, 1)[0:1]
 
         score = np.concatenate([score, cla_np], 0)
         lab = np.concatenate([lab, lab_np], 0)
+        name = np.concatenate([name, name_t], 0)
 
         confusion_matrix.add(torch.mean(pro, dim=0).view(1, 2).detach(), label[0:1].type(torch.LongTensor))
 
-        loss = loss_lsce(cla_score, label3)
+        loss = loss_lsce(bag_pred, label3)
         loss_av.add(loss.item())
 
     model.train()
     false_name = np.array(false_name)
     cm_value = confusion_matrix.value()
-    # print(cm_value)
     accuracy =  (cm_value[0][0] + cm_value[1][1]) / (cm_value.sum()+1e-8)
     sens_c = cm_value[0][0] / (cm_value[0][0] + cm_value[0][1]+1e-8)
     spec_c = cm_value[1][1] / (cm_value[1][1] + cm_value[1][0]+1e-8)
     if np.isnan(score).any() or np.isinf(score).any():
         score = np.nan_to_num(score)
     AUC = roc_auc_score(lab, score)
-
-    # cla.value() --> (mean,std)
-    return AUC, accuracy, sens_c, spec_c, loss_av.value()[0],score,lab,false_name
+    print(score.shape, name.shape)
+    return AUC, accuracy, sens_c, spec_c, loss_av.value()[0],score,lab, false_name, name
 
 
 
 if __name__=="__main__":
     train()
-
