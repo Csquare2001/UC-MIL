@@ -5,12 +5,12 @@ A preliminary implementation of UC-MIL.
 # 1. Environmental Requirements
 To run the codes, the following dependencies are required:
 + python 3.9
-+ PyTorch 2.0.1
++ PyTorch 1.12.0
 + cuda 11.3
-+ torchvision 0.15.2
++ torchvision 0.13.0
 + torchnet 0.0.4
-+ pandas 1.5.3
-+ numpy 1.23.5
++ pandas 2.2.3
++ numpy 1.26.4
 
 # 2. File Descriptions
 ```plaintext
