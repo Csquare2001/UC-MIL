@@ -157,9 +157,9 @@ class GraphConvolution(nn.Module):
 
 
 
-class UC_MIL(nn.Module):  #
+class C2_MIL(nn.Module):  #
     def __init__(self):
-        super(UC_MIL, self).__init__()
+        super(C2_MIL, self).__init__()
         self.conv_pre = patch_cnn()#[B,196,768]
         #self.conv_pre = cnn_pre()
         self.msa = msa_197_768()
@@ -222,7 +222,7 @@ if __name__ == "__main__":
     # a = torch.randn(4, 3, 224, 224).cuda()
     # label = torch.tensor([1,0,1,0],dtype=torch.long)
     label = torch.randn(4,196)
-    model = UC_MIL()
+    model = C2_MIL()
     model.train()
     total_num = sum(p.numel() for p in model.parameters())
     instance_pred, uncertainty, CauScore, topk_indices, F_c, F_nc, bag_pred = model(a,label)
