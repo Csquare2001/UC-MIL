@@ -1,5 +1,5 @@
 ## C²-MIL: A novel calibrated causal multiple instance learning for CT image-based mutation prediction
-A preliminary implementation of UC-MIL.
+A preliminary implementation of C²-MIL.
 
 
 # 1. Environmental Requirements
