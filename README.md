@@ -1,4 +1,4 @@
-## Calibrated causal multiple instance learning for computed tomography-based mutation prediction in lung cancer
+## Calibrated Causal Weakly Supervised Learning for Noninvasive Genotyping in Lung Cancer
 A preliminary implementation of C²-MIL.
 
 
